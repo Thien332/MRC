@@ -1,5 +1,14 @@
+from transformers import BertTokenizer, BertForPreTraining, BertForQuestionAnswering, BertModel, BertConfig
+from transformers import XLMRobertaForQuestionAnswering, XLMRobertaTokenizer
 import torch
-from transformers import RobertaTokenizer, RobertaForMaskedLM
+import torch.nn as nn
+from transformers.data.metrics.squad_metrics import compute_predictions_log_probs, compute_predictions_logits, squad_evaluate
+from transformers.data.processors.squad import SquadResult, SquadV1Processor, SquadV2Processor, SquadProcessor, SquadExample
+from transformers.data.processors.squad import squad_convert_examples_to_features
+from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from transformers import AdamW, get_linear_schedule_with_warmup
+from tqdm import trange, tqdm
 
 
 
@@ -15,33 +24,98 @@ class PythonPredictor:
         print(f"using device: {device}")
 
         self.device = device
-        self.model = RobertaForMaskedLM.from_pretrained('roberta-base',return_dict = True)
-        self.tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+        self.model = RobertaForQuestionAnswering.from_pretrained("./final_model").to(device)
+        self.tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
+    def to_list(tensor):
+        return tensor.detach().cpu().tolist()
 
+    def evaluate(model, tokenizer, dev_dataset, dev_examples, dev_features):
+        eval_sampler = SequentialSampler(dev_dataset)
+        eval_dataloader = DataLoader(dev_dataset, sampler=eval_sampler, batch_size=32)
+        all_results = []
+    #     start_time = timeit.default_timer()
+        for batch in tqdm(eval_dataloader, desc="Evaluating"):
+            model.eval()
+            batch = tuple(t.to(device) for t in batch)
+            with torch.no_grad():
+                inputs = {
+                    "input_ids": batch[0],
+                    "attention_mask": batch[1],
+    #                "token_type_ids": batch[2],
+                }
+                example_indices = batch[3]
+                outputs = model(**inputs)
+            for i, example_index in enumerate(example_indices):
+                eval_feature = dev_features[example_index.item()]
+                unique_id = int(eval_feature.unique_id)
+                output = [to_list(output[i]) for output in outputs]
+                if len(output) >= 5:
+                    start_logits = output[0]
+                    start_top_index = output[1]
+                    end_logits = output[2]
+                    end_top_index = output[3]
+                    cls_logits = output[4]
 
+                    result = SquadResult(
+                        unique_id,
+                        start_logits,
+                        end_logits,
+                        start_top_index=start_top_index,
+                        end_top_index=end_top_index,
+                        cls_logits=cls_logits,
+                    )
+                else:
+                    start_logits, end_logits = output
+                    result = SquadResult(unique_id, start_logits, end_logits)
+                all_results.append(result)
 
+        output_prediction_file = os.path.join("./", "predictions_{}.json".format(""))
+        output_nbest_file = os.path.join("./", "nbest_predictions_{}.json".format(""))
+        output_null_log_odds_file = os.path.join("./", "null_odds_{}.json".format(""))
+        predictions = compute_predictions_logits(
+                dev_examples,
+                dev_features,
+                all_results,
+                20,
+                128,
+                False,
+                output_prediction_file,
+                output_nbest_file,
+                output_null_log_odds_file,
+                True,
+                False,
+                0.0,
+                tokenizer,
+            )
+        return predictions
+
+#     def get_qa(topic, data):
+#         q = []
+#         a = []
+#         for d in data['data']:
+#             if d['title']==topic:
+#                 for paragraph in d['paragraphs']:
+#                     for qa in paragraph['qas']:
+#                         if not qa['is_impossible']:
+#                             q.append(qa['question'])
+#                             a.append(qa['answers'][0]['text'])
+#                 return q,a
+
+#     questions, answers = get_qa(topic='Premier_League', data=data)
+
+    print("Number of available questions: {}".format(len(questions)))
 
     def predict(self, payload):
-        """This method is required. It is called once per request. 
-        Preprocesses the request payload, runs inference, and 
-        postprocesses the inference output.
-
-        :param payload (optional): The request payload
-        :returns : Prediction or a batch of predictions.
-        """
-        # gen_tokens = self.model.generate(payload["text"], do_sample=True, temperature=0.9, max_length=100)
-        # self.tokenizer.batch_decode(gen_tokens)[0]
-        inputs = self.tokenizer.encode_plus(payload["text"], return_tensors="pt")
-        mask_token_index = torch.where(inputs["input_ids"][0] == self.tokenizer.mask_token_id)
-
-        token_logits = self.model(**inputs).logits
-        mask_token_logits = token_logits[0, mask_token_index, :]
-        top_tokens = torch.topk(mask_token_logits, 1, dim=1).indices[0].tolist()
-        # f_token = self.tokenizer.decode([top_tokens])[0]
-        for token in top_tokens:
-            word = self.tokenizer.decode([token])
-            new_sentence = payload["text"].replace(self.tokenizer.mask_token, word)
-            # print(new_sentence)
+        test_examples = processor.get_dev_examples('',payload["text])
+        test_features, test_dataset = squad_convert_examples_to_features(test_examples, 
+                                                               tokenizer, 
+                                                               max_seq_length = 256, 
+                                                               doc_stride = 81,
+                                                               max_query_length = 81,
+                                                               is_training = False,
+                                                               return_dataset = 'pt',
+                                                               threads = 10
+                                                               )
+        results = evaluate(self.model, self.tokenizer, test_dataset, test_examples, test_features)
+        return results
         
-
-        return new_sentence
