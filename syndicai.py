@@ -26,6 +26,7 @@ class PythonPredictor:
         self.device = device
         self.model = RobertaForQuestionAnswering.from_pretrained("./final_model").to(device)
         self.tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
+        self.processor= SquadV1Processor()
     def to_list(tensor):
         return tensor.detach().cpu().tolist()
 
@@ -106,7 +107,7 @@ class PythonPredictor:
     print("Number of available questions: {}".format(len(questions)))
 
     def predict(self, payload):
-        test_examples = processor.get_dev_examples('',payload["text])
+        test_examples = self.processor.get_dev_examples('',payload["text])
         test_features, test_dataset = squad_convert_examples_to_features(test_examples, 
                                                                tokenizer, 
                                                                max_seq_length = 256, 
